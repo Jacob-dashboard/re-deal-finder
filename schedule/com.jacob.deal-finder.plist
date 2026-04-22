@@ -1,0 +1,73 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
+  "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  launchd plist — RE Deal Finder
+  Fires run_search.py at 10:00 AM CT and 10:00 PM CT daily.
+
+  CT = UTC-6 (standard) / UTC-5 (daylight). launchd uses LOCAL time,
+  so these fire at the correct local time automatically when the Mac's
+  timezone is set to America/Chicago.
+
+  Install: copy to ~/Library/LaunchAgents/ then:
+    launchctl load ~/Library/LaunchAgents/com.jacob.deal-finder.plist
+  Or run schedule/install.sh (does both steps).
+-->
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.jacob.deal-finder</string>
+
+    <!-- Fire at 10:00 AM and 10:00 PM local time -->
+    <key>StartCalendarInterval</key>
+    <array>
+        <dict>
+            <key>Hour</key>
+            <integer>10</integer>
+            <key>Minute</key>
+            <integer>0</integer>
+        </dict>
+        <dict>
+            <key>Hour</key>
+            <integer>22</integer>
+            <key>Minute</key>
+            <integer>0</integer>
+        </dict>
+    </array>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>/bin/bash</string>
+        <string>/Users/jacob/Projects/re-deal-finder/run_search.sh</string>
+        <string>--channel</string>
+        <string>all</string>
+        <string>--limit</string>
+        <string>50</string>
+    </array>
+
+    <!-- Working directory — output/ and log file land here -->
+    <key>WorkingDirectory</key>
+    <string>/Users/jacob/Projects/re-deal-finder</string>
+
+    <!-- Stdout / stderr logs -->
+    <key>StandardOutPath</key>
+    <string>/Users/jacob/Projects/re-deal-finder/output/launchd_stdout.log</string>
+    <key>StandardErrorPath</key>
+    <string>/Users/jacob/Projects/re-deal-finder/output/launchd_stderr.log</string>
+
+    <!-- Don't run if Mac is asleep; run on wake if missed -->
+    <key>RunAtLoad</key>
+    <false/>
+
+    <!-- Restart on crash -->
+    <key>KeepAlive</key>
+    <false/>
+
+    <!-- Environment: ensure PATH includes homebrew Python -->
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>PATH</key>
+        <string>/opt/homebrew/bin:/opt/homebrew/sbin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+    </dict>
+</dict>
+</plist>

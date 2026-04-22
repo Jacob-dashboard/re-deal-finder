@@ -1,0 +1,21 @@
+# Output files (contain real deal data — don't commit)
+output/
+*.log
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+venv/
+*.egg-info/
+.eggs/
+dist/
+build/
+
+# macOS
+.DS_Store
+
+# Secrets
+.env
+*.env
