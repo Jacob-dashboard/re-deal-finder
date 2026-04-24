@@ -42,6 +42,8 @@ logger = logging.getLogger("run_search")
 # ---------------------------------------------------------------------------
 from scraper.loopnet       import scrape as scrape_loopnet
 from scraper.crexi         import scrape as scrape_crexi
+from scraper.redfin        import scrape as scrape_redfin
+from scraper.realtor       import scrape as scrape_realtor
 from scraper.cook_county   import scrape as scrape_cook_county
 from scraper.chicago_data  import scrape as scrape_chicago_data
 from scraper.foreclosure   import scrape as scrape_foreclosure
@@ -57,6 +59,8 @@ from pipeline.alert  import run_alerts
 # Scraper registry
 # ---------------------------------------------------------------------------
 ON_MARKET_SCRAPERS = {
+    "redfin":  scrape_redfin,
+    "realtor": scrape_realtor,
     "loopnet": scrape_loopnet,
     "crexi":   scrape_crexi,
 }

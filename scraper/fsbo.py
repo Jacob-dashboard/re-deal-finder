@@ -151,39 +151,53 @@ def _scrape_craigslist(url: str, category: str, limit: int = 30) -> list[Deal]:
     logger.info("FSBO/CL: scraping %s", url)
     deals = []
 
-    for page_offset in range(0, min(limit * 2, 240), 120):  # CL paginates by 120
+    # Craigslist does simple keyword search — use a single common term
+    # and filter for relevance ourselves
+    search_queries = [
+        "apartment building",
+        "multifamily",
+        "investment property",
+        "6 flat",
+        "8 flat",
+    ]
+
+    seen_urls: set = set()
+
+    for query in search_queries:
         if len(deals) >= limit:
             break
 
         params = {
-            "query": "apartment building OR multifamily OR multi-family OR mixed use OR investment property",
-            "srchType": "A",
-            "hasPic": 0,
-            "s": page_offset,
+            "query":    query,
+            "hasPic":   0,
+            "s":        0,  # start offset
         }
         soup = _get(url, params=params)
         if not soup:
-            logger.warning("FSBO/CL: failed to fetch %s offset=%d", url, page_offset)
-            break
+            logger.warning("FSBO/CL: failed to fetch %s query=%s", url, query)
+            continue
 
-        # Craigslist listing rows
+        # Craigslist listing rows — new CL uses cl-static-search-result
         items = (
             soup.select("li.cl-static-search-result")
-            or soup.select(".result-row")
             or soup.select("li.result-row")
+            or soup.select(".result-row")
         )
         if not items:
-            logger.info("FSBO/CL: no items found at offset %d", page_offset)
-            break
+            logger.info("FSBO/CL: no items for query=%s", query)
+            continue
 
         for item in items:
             if len(deals) >= limit:
                 break
 
-            title_el = item.select_one(".title, a.titlestring, .cl-app-anchor")
-            price_el = item.select_one(".price, .result-price")
-            hood_el  = item.select_one(".result-hood, .label, .location")
-            link_el  = item.select_one("a.titlestring, a.cl-app-anchor, a[href*='/d/']")
+            # New CL structure: a.cl-app-anchor wraps entire card
+            link_el  = item.select_one("a.cl-app-anchor, a.titlestring, a[href*='/d/']")
+            title_el = item.select_one(
+                ".label, .title, a.cl-app-anchor, a.titlestring, [class*='title']"
+            )
+            price_el = item.select_one(".price, .result-price, [class*='price']")
+            hood_el  = item.select_one(".location, .result-hood, [class*='location']")
 
             title    = title_el.get_text(strip=True) if title_el else ""
             price_text = price_el.get_text(strip=True) if price_el else ""
@@ -193,12 +207,27 @@ def _scrape_craigslist(url: str, category: str, limit: int = 30) -> list[Deal]:
                 href = link_el["href"]
                 link_url = href if href.startswith("http") else CL_BASE + href
 
-            if not title or not _is_relevant(title):
+            if not title:
                 continue
 
+            if not _is_relevant(title):
+                continue
+
+            # Skip duplicates across queries
+            if link_url and link_url in seen_urls:
+                continue
+            if link_url:
+                seen_urls.add(link_url)
+
+            # Neighborhood: check title + hood text, but also allow
+            # anything that's in Chicago proper (hood_text may be "Chicago")
             neighborhood = _detect_neighborhood(title + " " + hood_text)
             if not neighborhood:
-                continue
+                # Accept if CL location says "Chicago" broadly and title has units
+                combined = (title + " " + hood_text).lower()
+                if "chicago" not in combined:
+                    continue
+                neighborhood = "Chicago"  # unknown neighborhood but valid city
 
             price = _parse_price(price_text)
             units = _parse_units(title)
@@ -215,14 +244,9 @@ def _scrape_craigslist(url: str, category: str, limit: int = 30) -> list[Deal]:
                 units=units,
                 price=price,
                 url=link_url,
-                raw={"title": title, "category": category},
+                raw={"title": title, "category": category, "query": query},
             )
             deals.append(deal)
-
-        # CL pagination check
-        next_btn = soup.select_one("a.button.next, .cl-next-page")
-        if not next_btn:
-            break
 
     logger.info("FSBO/CL: %s yielded %d deals", category, len(deals))
     return deals
