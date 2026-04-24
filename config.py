@@ -117,9 +117,9 @@ PIPELINE_OUTPUT_DIR   = "/Users/jacob/Documents/Models/RealEstate/Pipeline/"
 LOCAL_OUTPUT_DIR      = "output"
 TOP_DEALS_TO_CLONE    = 5
 
-# Telegram (set these env vars or paste tokens directly if running locally)
-TELEGRAM_BOT_TOKEN  = ""   # os.environ.get("TELEGRAM_BOT_TOKEN", "")
-TELEGRAM_CHAT_ID    = ""   # os.environ.get("TELEGRAM_CHAT_ID", "")
+# Telegram
+TELEGRAM_BOT_TOKEN  = "8632113390:AAGayabSa8J18r5Vt-2BTNeBGLItfYIFtE4"
+TELEGRAM_CHAT_ID    = None  # Discovered at runtime via getUpdates; message @Vortex100_bot first
 
 # Email (future)
 ALERT_EMAIL = ""
