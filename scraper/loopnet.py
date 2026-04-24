@@ -1,13 +1,8 @@
 """
 LoopNet scraper — on-market multifamily/mixed-use in Cook County, IL.
 
-LoopNet aggressively blocks headless scrapers. This implementation:
-  1. Rotates user agents
-  2. Adds browser-like headers
-  3. Rate-limits between requests
-  4. Fails gracefully and logs when blocked (403/429/CAPTCHA)
-
-If blocked consistently, next step is Playwright with stealth plugin.
+Uses Playwright (headless Chromium) to bypass JS rendering and anti-bot
+measures. Falls back gracefully with a warning if blocked.
 """
 
 import logging
@@ -15,9 +10,8 @@ import random
 import re
 import time
 from typing import Optional
-from urllib.parse import urlencode, urljoin
+from urllib.parse import urljoin
 
-import requests
 from bs4 import BeautifulSoup
 
 from scraper import Deal
@@ -31,73 +25,18 @@ SEARCH_URL = (
     "cook-county-il/for-sale/"
 )
 
-HEADERS_POOL = [
-    {
-        "User-Agent": (
-            "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
-            "AppleWebKit/537.36 (KHTML, like Gecko) "
-            "Chrome/124.0.0.0 Safari/537.36"
-        ),
-        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-        "Accept-Language": "en-US,en;q=0.9",
-        "Accept-Encoding": "gzip, deflate, br",
-        "Connection": "keep-alive",
-        "Referer": "https://www.loopnet.com/",
-        "Upgrade-Insecure-Requests": "1",
-    },
-    {
-        "User-Agent": (
-            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-            "AppleWebKit/537.36 (KHTML, like Gecko) "
-            "Chrome/123.0.0.0 Safari/537.36 Edg/123.0.0.0"
-        ),
-        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8",
-        "Accept-Language": "en-US,en;q=0.5",
-        "Accept-Encoding": "gzip, deflate, br",
-        "Connection": "keep-alive",
-        "Referer": "https://www.google.com/",
-        "Upgrade-Insecure-Requests": "1",
-    },
-]
+# Realistic viewport + UA to avoid bot detection
+VIEWPORT = {"width": 1280, "height": 800}
+USER_AGENT = (
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+    "AppleWebKit/537.36 (KHTML, like Gecko) "
+    "Chrome/124.0.0.0 Safari/537.36"
+)
 
 
-def _get(url: str, session: requests.Session, params: dict = None) -> Optional[BeautifulSoup]:
-    """GET with retry, rate-limiting, and graceful failure."""
-    for attempt in range(config.MAX_RETRIES):
-        try:
-            time.sleep(random.uniform(config.REQUEST_DELAY_MIN, config.REQUEST_DELAY_MAX))
-            headers = random.choice(HEADERS_POOL)
-            resp = session.get(
-                url,
-                headers=headers,
-                params=params,
-                timeout=config.REQUEST_TIMEOUT,
-                allow_redirects=True,
-            )
-            if resp.status_code == 200:
-                soup = BeautifulSoup(resp.text, "lxml")
-                # Detect CAPTCHA / Cloudflare challenge pages
-                title = soup.title.string if soup.title else ""
-                if any(kw in title.lower() for kw in ["captcha", "challenge", "access denied", "just a moment"]):
-                    logger.warning("LoopNet: CAPTCHA/challenge detected. Consider Playwright.")
-                    return None
-                return soup
-            elif resp.status_code in (403, 429):
-                wait = (2 ** attempt) * 5
-                logger.warning(
-                    "LoopNet: HTTP %s (attempt %d/%d), waiting %ds",
-                    resp.status_code, attempt + 1, config.MAX_RETRIES, wait,
-                )
-                time.sleep(wait)
-            else:
-                logger.warning("LoopNet: unexpected status %s for %s", resp.status_code, url)
-                return None
-        except requests.RequestException as e:
-            logger.error("LoopNet: request error on attempt %d: %s", attempt + 1, e)
-            time.sleep(2 ** attempt)
-    logger.error("LoopNet: all retries exhausted for %s", url)
-    return None
-
+# ---------------------------------------------------------------------------
+# Parsers (shared between Playwright and stub paths)
+# ---------------------------------------------------------------------------
 
 def _parse_price(text: str) -> Optional[float]:
     text = re.sub(r"[^\d.]", "", text or "")
@@ -138,16 +77,22 @@ def _parse_listing_card(card, base_url: str = BASE_URL) -> Optional[Deal]:
             deal.url = urljoin(base_url, link["href"])
 
         # Address
-        addr_el = card.select_one("[data-testid='address'], .listingCard-propertyAddress, .listing-address")
+        addr_el = card.select_one(
+            "[data-testid='address'], .listingCard-propertyAddress, "
+            ".listing-address, [class*='address']"
+        )
         if addr_el:
             deal.address = addr_el.get_text(separator=", ", strip=True)
 
         # Price
-        price_el = card.select_one("[data-testid='price'], .listingCard-priceValue, .price")
+        price_el = card.select_one(
+            "[data-testid='price'], .listingCard-priceValue, .price, "
+            "[class*='price']"
+        )
         if price_el:
             deal.price = _parse_price(price_el.get_text(strip=True))
 
-        # Units
+        # Units / cap rate / sqft from detail elements
         for el in card.select(".listingCard-detail, .listing-detail, [class*='detail']"):
             text = el.get_text(strip=True)
             if "unit" in text.lower():
@@ -158,17 +103,19 @@ def _parse_listing_card(card, base_url: str = BASE_URL) -> Optional[Deal]:
                 deal.sqft = _parse_int(text)
 
         # Asset class
-        type_el = card.select_one(".listingCard-propertyType, [class*='property-type']")
+        type_el = card.select_one(
+            ".listingCard-propertyType, [class*='property-type'], [class*='propertyType']"
+        )
         if type_el:
             deal.asset_class = type_el.get_text(strip=True).lower()
 
         # Broker
-        broker_el = card.select_one(".listingCard-brokerName, .broker-name")
+        broker_el = card.select_one(".listingCard-brokerName, .broker-name, [class*='broker']")
         if broker_el:
             deal.broker = broker_el.get_text(strip=True)
 
         # Listing date / DOM
-        date_el = card.select_one("[data-testid='listing-date'], .listingCard-date")
+        date_el = card.select_one("[data-testid='listing-date'], .listingCard-date, [class*='date']")
         if date_el:
             deal.listing_date = date_el.get_text(strip=True)
 
@@ -182,6 +129,125 @@ def _parse_listing_card(card, base_url: str = BASE_URL) -> Optional[Deal]:
         return None
 
 
+# ---------------------------------------------------------------------------
+# Playwright fetch
+# ---------------------------------------------------------------------------
+
+def _scrape_with_playwright(limit: int) -> list[Deal]:
+    """Scrape LoopNet using headless Chromium via Playwright."""
+    try:
+        from playwright.sync_api import sync_playwright, TimeoutError as PWTimeout
+    except ImportError:
+        logger.error("LoopNet: playwright not installed — run: pip install playwright && playwright install chromium")
+        return []
+
+    deals: list[Deal] = []
+    max_pages = min(3, config.MAX_PAGES)
+
+    try:
+        with sync_playwright() as p:
+            browser = p.chromium.launch(headless=True)
+            ctx = browser.new_context(
+                viewport=VIEWPORT,
+                user_agent=USER_AGENT,
+                locale="en-US",
+            )
+            page = ctx.new_page()
+
+            # Block images/fonts to speed up
+            page.route("**/*.{png,jpg,jpeg,gif,svg,woff,woff2,ttf}", lambda r: r.abort())
+
+            logger.info("LoopNet: navigating to search page")
+            try:
+                page.goto(SEARCH_URL, wait_until="domcontentloaded", timeout=30_000)
+            except PWTimeout:
+                logger.warning("LoopNet: page load timed out — site may be blocking headless browsers")
+                browser.close()
+                return []
+
+            # Detect CAPTCHA / challenge
+            title = page.title().lower()
+            if any(kw in title for kw in ["captcha", "challenge", "access denied", "just a moment"]):
+                logger.warning("LoopNet: CAPTCHA/challenge detected on initial load — returning empty")
+                browser.close()
+                return []
+
+            for page_num in range(1, max_pages + 1):
+                if len(deals) >= limit:
+                    break
+
+                logger.info("LoopNet: scraping page %d", page_num)
+
+                # Wait for listing cards (any of the known selectors)
+                try:
+                    page.wait_for_selector(
+                        "article.listingCard, [data-testid='listing-card'], "
+                        ".listing-card, li.placard",
+                        timeout=15_000,
+                    )
+                except PWTimeout:
+                    logger.warning("LoopNet: no cards appeared on page %d — blocked or end of results", page_num)
+                    break
+
+                # Small human-like delay after render
+                time.sleep(random.uniform(3, 5))
+
+                html = page.content()
+                soup = BeautifulSoup(html, "lxml")
+
+                cards = (
+                    soup.select("article.listingCard")
+                    or soup.select("[data-testid='listing-card']")
+                    or soup.select(".listing-card")
+                    or soup.select("li.placard")
+                )
+
+                if not cards:
+                    logger.info("LoopNet: no cards found on page %d", page_num)
+                    break
+
+                for card in cards:
+                    deal = _parse_listing_card(card)
+                    if deal and deal.url:
+                        deals.append(deal)
+                    if len(deals) >= limit:
+                        break
+
+                logger.info("LoopNet: page %d → %d cards (total: %d)", page_num, len(cards), len(deals))
+
+                if page_num >= max_pages or len(deals) >= limit:
+                    break
+
+                # Try to go to next page
+                next_btn = page.query_selector(
+                    "a[aria-label='Next page'], .pagination-next:not(.disabled), "
+                    "[class*='nextPage']:not([class*='disabled'])"
+                )
+                if not next_btn:
+                    logger.info("LoopNet: no next-page button — end of results at page %d", page_num)
+                    break
+
+                try:
+                    next_btn.click()
+                    page.wait_for_load_state("domcontentloaded", timeout=15_000)
+                    time.sleep(random.uniform(3, 5))
+                except PWTimeout:
+                    logger.warning("LoopNet: timeout waiting for next page — stopping")
+                    break
+
+            browser.close()
+
+    except Exception as e:
+        logger.warning("LoopNet: Playwright error — %s — returning %d deals collected", e, len(deals))
+
+    logger.info("LoopNet: Playwright scrape complete — %d deals", len(deals))
+    return deals
+
+
+# ---------------------------------------------------------------------------
+# Main entry point
+# ---------------------------------------------------------------------------
+
 def scrape(dry_run: bool = False, limit: int = 50) -> list[Deal]:
     """
     Main entry point. Returns list of Deal objects from LoopNet.
@@ -191,52 +257,18 @@ def scrape(dry_run: bool = False, limit: int = 50) -> list[Deal]:
         logger.info("LoopNet: dry-run mode — returning stub deals")
         return _stub_deals()
 
-    logger.info("LoopNet: starting scrape (max_pages=%d, limit=%d)", config.MAX_PAGES, limit)
-    session = requests.Session()
-    deals: list[Deal] = []
+    logger.info("LoopNet: starting Playwright scrape (limit=%d)", limit)
+    deals = _scrape_with_playwright(limit)
 
-    for page in range(1, config.MAX_PAGES + 1):
-        if len(deals) >= limit:
-            break
+    if not deals:
+        logger.warning("LoopNet: no deals retrieved — site likely blocked headless browser")
 
-        params = {"page": page} if page > 1 else {}
-        logger.info("LoopNet: fetching page %d", page)
-        soup = _get(SEARCH_URL, session, params)
-
-        if soup is None:
-            logger.warning("LoopNet: failed to fetch page %d, stopping pagination", page)
-            break
-
-        # Try multiple card selectors across LoopNet's changing DOM
-        cards = (
-            soup.select("article.listingCard")
-            or soup.select("[data-testid='listing-card']")
-            or soup.select(".listing-card")
-            or soup.select("li.placard")
-        )
-
-        if not cards:
-            logger.info("LoopNet: no cards found on page %d — likely end of results or blocked", page)
-            break
-
-        for card in cards:
-            deal = _parse_listing_card(card)
-            if deal and deal.url:
-                deals.append(deal)
-            if len(deals) >= limit:
-                break
-
-        logger.info("LoopNet: page %d yielded %d cards (total so far: %d)", page, len(cards), len(deals))
-
-        # Check for next page
-        next_btn = soup.select_one("a[aria-label='Next page'], .pagination-next:not(.disabled)")
-        if not next_btn:
-            logger.info("LoopNet: reached last page at page %d", page)
-            break
-
-    logger.info("LoopNet: scrape complete — %d deals collected", len(deals))
     return deals
 
+
+# ---------------------------------------------------------------------------
+# Stub data
+# ---------------------------------------------------------------------------
 
 def _stub_deals() -> list[Deal]:
     """Synthetic deals for dry-run / testing."""

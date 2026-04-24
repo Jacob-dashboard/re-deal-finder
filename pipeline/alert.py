@@ -20,6 +20,8 @@ from datetime import date, datetime
 from pathlib import Path
 from typing import Optional
 
+import requests as _requests
+
 from scraper import Deal
 import config
 
@@ -214,6 +216,89 @@ def write_summary_md(
 
 
 # ---------------------------------------------------------------------------
+# Telegram notifications
+# ---------------------------------------------------------------------------
+
+def _discover_chat_id(bot_token: str) -> Optional[str]:
+    """Poll getUpdates to find the first chat_id that messaged the bot."""
+    try:
+        resp = _requests.get(
+            f"https://api.telegram.org/bot{bot_token}/getUpdates",
+            timeout=10,
+        )
+        data = resp.json()
+        if data.get("ok") and data.get("result"):
+            for update in data["result"]:
+                msg = update.get("message") or update.get("channel_post")
+                if msg:
+                    return str(msg["chat"]["id"])
+    except Exception as e:
+        logger.debug("Telegram: getUpdates error: %s", e)
+    return None
+
+
+def send_telegram(message: str, bot_token: str, chat_id: str) -> None:
+    """Send a Telegram message. Fails silently on error."""
+    try:
+        url = f"https://api.telegram.org/bot{bot_token}/sendMessage"
+        _requests.post(
+            url,
+            json={"chat_id": chat_id, "text": message, "parse_mode": "Markdown"},
+            timeout=10,
+        )
+        logger.info("Telegram: message sent to chat %s", chat_id)
+    except Exception as e:
+        logger.warning("Telegram: send failed: %s", e)
+
+
+def send_telegram_alert(deals: list, classified: dict, slot: str) -> None:
+    """
+    Build and send a Telegram scan summary to Jacob.
+    Auto-discovers chat_id via getUpdates if not set in config.
+    """
+    bot_token = config.TELEGRAM_BOT_TOKEN
+    if not bot_token:
+        logger.debug("Telegram: no bot token configured — skipping")
+        return
+
+    # Resolve chat_id
+    chat_id = config.TELEGRAM_CHAT_ID
+    if not chat_id:
+        chat_id = _discover_chat_id(bot_token)
+        if not chat_id:
+            logger.warning(
+                "Telegram: chat_id unknown — message @Vortex100_bot first, then re-run"
+            )
+            return
+
+    today = date.today().strftime("%Y-%m-%d")
+    slot_label = slot.title()
+    n_new = len(classified["new"])
+    n_updated = len(classified["updated"])
+
+    lines = [
+        f"*RE Deal Scan — {slot_label} {today}*",
+        f"{n_new} new deals found, {n_updated} updated",
+        "",
+    ]
+
+    top3 = deals[:3]
+    if top3:
+        lines.append("*Top 3 Deals:*")
+        for i, d in enumerate(top3, 1):
+            addr = d.address or "address unknown"
+            nbhd = d.neighborhood or "neighborhood unknown"
+            score = f"{d.score:.0f}/100"
+            source = d.source.replace("_", " ").title()
+            lines.append(f"{i}. {addr} ({nbhd}) — Score {score} — {source}")
+        lines.append("")
+
+    lines.append("_Full report: latest\\_scan.md_")
+
+    send_telegram("\n".join(lines), bot_token, chat_id)
+
+
+# ---------------------------------------------------------------------------
 # macOS notifications
 # ---------------------------------------------------------------------------
 
@@ -362,7 +447,10 @@ def run_alerts(
     # 4. macOS notification
     send_notification(classified, len(deals))
 
-    # 5. Clone proformas for top deals
+    # 5. Telegram alert
+    send_telegram_alert(deals, classified, slot)
+
+    # 7. Clone proformas for top deals
     if clone_proformas:
         for rank, deal in enumerate(deals[:config.TOP_DEALS_TO_CLONE], 1):
             clone_proforma(deal, rank)
