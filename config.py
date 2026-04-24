@@ -119,7 +119,7 @@ TOP_DEALS_TO_CLONE    = 5
 
 # Telegram
 TELEGRAM_BOT_TOKEN  = "8632113390:AAGayabSa8J18r5Vt-2BTNeBGLItfYIFtE4"
-TELEGRAM_CHAT_ID    = None  # Discovered at runtime via getUpdates; message @Vortex100_bot first
+TELEGRAM_CHAT_ID    = "7748324699"  # @frogtree200 / The Narrator
 
 # Email (future)
 ALERT_EMAIL = ""
