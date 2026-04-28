@@ -29,12 +29,17 @@ CREXI_SEARCH_URL = (
 # Fallback: Crexi's internal search API (observed via browser devtools — may change)
 CREXI_API_BASE = "https://api.crexi.com/assets"
 
-VIEWPORT = {"width": 1280, "height": 900}
+VIEWPORT = {"width": 1920, "height": 1080}
 USER_AGENT = (
     "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
     "AppleWebKit/537.36 (KHTML, like Gecko) "
-    "Chrome/124.0.0.0 Safari/537.36"
+    "Chrome/125.0.0.0 Safari/537.36"
 )
+LAUNCH_ARGS = [
+    "--disable-blink-features=AutomationControlled",
+    "--no-sandbox",
+    "--disable-dev-shm-usage",
+]
 
 API_HEADERS = {
     "User-Agent": USER_AGENT,
@@ -183,14 +188,24 @@ def _scrape_with_playwright(limit: int) -> list[Deal]:
 
     try:
         with sync_playwright() as p:
-            browser = p.chromium.launch(headless=True)
+            try:
+                browser = p.chromium.launch(headless=True, channel="chrome", args=LAUNCH_ARGS)
+            except Exception:
+                browser = p.chromium.launch(headless=True, args=LAUNCH_ARGS)
             ctx = browser.new_context(
                 viewport=VIEWPORT,
                 user_agent=USER_AGENT,
                 locale="en-US",
+                timezone_id="America/Chicago",
             )
             page = ctx.new_page()
+            try:
+                from playwright_stealth import Stealth
+                Stealth().apply_stealth_sync(page)
+            except Exception:
+                pass
             page.route("**/*.{png,jpg,jpeg,gif,svg,woff,woff2,ttf}", lambda r: r.abort())
+            time.sleep(random.uniform(2.0, 5.0))
 
             logger.info("Crexi: navigating to %s", CREXI_SEARCH_URL)
             try:

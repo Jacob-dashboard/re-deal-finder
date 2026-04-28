@@ -167,8 +167,18 @@ def score_deal(deal: Deal) -> Deal:
 
     # Weighted sum
     total = sum(sub_scores[k] * w[k] for k in w)
+
+    # Cross-source confidence boost: +10 pts for each additional source the
+    # same deal showed up on (reflects validation that the listing is real
+    # and actively marketed across multiple channels).
+    extra_sources = max(0, len(deal.sources or []) - 1)
+    cross_source_bonus = 10.0 * extra_sources
+    total += cross_source_bonus
+
     deal.score = round(total, 1)
     deal.score_breakdown = {k: round(v, 1) for k, v in sub_scores.items()}
+    if cross_source_bonus:
+        deal.score_breakdown["cross_source_bonus"] = round(cross_source_bonus, 1)
     return deal
 
 

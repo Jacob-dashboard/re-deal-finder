@@ -145,11 +145,35 @@ def write_csv(deals: list[Deal], path: Path) -> None:
     logger.info("alert: wrote CSV → %s", path)
 
 
+def _dedup_summary_line(stats: Optional[dict]) -> Optional[str]:
+    """Format a one-line dedup summary like
+    '33 raw → 28 unique (5 duplicates merged across LoopNet + Crexi)'.
+    Returns None if stats is empty/missing.
+    """
+    if not stats:
+        return None
+    raw = stats.get("raw")
+    unique = stats.get("unique")
+    merged = stats.get("merged", 0)
+    cross = stats.get("cross_source_merges", 0)
+    if raw is None or unique is None:
+        return None
+    if merged == 0:
+        return f"{raw} raw → {unique} unique (no duplicates)"
+    if cross > 0:
+        return (
+            f"{raw} raw → {unique} unique "
+            f"({merged} duplicates merged, {cross} across LoopNet + Crexi)"
+        )
+    return f"{raw} raw → {unique} unique ({merged} duplicates merged)"
+
+
 def write_summary_md(
     deals: list[Deal],
     classified: dict,
     slot: str,
     path: Path,
+    dedup_stats: Optional[dict] = None,
 ) -> None:
     """Write a human-readable Markdown scan summary."""
     today     = date.today().isoformat()
@@ -161,6 +185,12 @@ def write_summary_md(
         f"# RE Deal Scan — {today} ({slot.title()})",
         f"",
         f"**{n_new} NEW** | **{n_updated} UPDATED** | {n_total} total qualifying deals",
+    ]
+    dedup_line = _dedup_summary_line(dedup_stats)
+    if dedup_line:
+        lines.append(f"")
+        lines.append(f"_Dedup: {dedup_line}_")
+    lines += [
         f"",
         f"---",
         f"",
@@ -251,7 +281,12 @@ def send_telegram(message: str, bot_token: str, chat_id: str) -> None:
         logger.warning("Telegram: send failed: %s", e)
 
 
-def send_telegram_alert(deals: list, classified: dict, slot: str) -> None:
+def send_telegram_alert(
+    deals: list,
+    classified: dict,
+    slot: str,
+    dedup_stats: Optional[dict] = None,
+) -> None:
     """
     Build and send a Telegram scan summary to Jacob.
     Auto-discovers chat_id via getUpdates if not set in config.
@@ -279,8 +314,11 @@ def send_telegram_alert(deals: list, classified: dict, slot: str) -> None:
     lines = [
         f"*RE Deal Scan — {slot_label} {today}*",
         f"{n_new} new deals found, {n_updated} updated",
-        "",
     ]
+    dedup_line = _dedup_summary_line(dedup_stats)
+    if dedup_line:
+        lines.append(f"_{dedup_line}_")
+    lines.append("")
 
     top3 = deals[:3]
     if top3:
@@ -405,6 +443,7 @@ def run_alerts(
     deals: list[Deal],
     slot: str = None,
     clone_proformas: bool = True,
+    dedup_stats: Optional[dict] = None,
 ) -> dict:
     """
     Full alert pipeline:
@@ -433,7 +472,7 @@ def run_alerts(
 
     write_json(deals, json_path)
     write_csv(deals, csv_path)
-    write_summary_md(deals, classified, slot, summary_path)
+    write_summary_md(deals, classified, slot, summary_path, dedup_stats=dedup_stats)
 
     # 3. Mirror summary to Pipeline dir
     try:
@@ -448,7 +487,7 @@ def run_alerts(
     send_notification(classified, len(deals))
 
     # 5. Telegram alert
-    send_telegram_alert(deals, classified, slot)
+    send_telegram_alert(deals, classified, slot, dedup_stats=dedup_stats)
 
     # 7. Clone proformas for top deals
     if clone_proformas:

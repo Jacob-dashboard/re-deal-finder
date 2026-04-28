@@ -118,17 +118,26 @@ def run(
     logger.info("Raw deals collected: %d (across all scrapers)", len(raw_deals))
 
     # ---- Filter + dedup ----
-    filtered = filter_and_dedup(raw_deals, verbose=verbose)
+    filtered, dedup_stats = filter_and_dedup(raw_deals, verbose=verbose)
+    logger.info(
+        "Pipeline: %d raw → %d after filter → %d unique "
+        "(%d merged, %d cross-source)",
+        len(raw_deals),
+        dedup_stats.get("filtered_in", len(filtered)),
+        dedup_stats.get("unique", len(filtered)),
+        dedup_stats.get("merged", 0),
+        dedup_stats.get("cross_source_merges", 0),
+    )
 
     # ---- Score ----
     scored = score_deals(filtered)
 
     # ---- Summary to console ----
-    _print_summary(scored)
+    _print_summary(scored, dedup_stats)
 
     # ---- Alerts / output ----
     if not no_alert and scored:
-        run_alerts(scored, slot=slot)
+        run_alerts(scored, slot=slot, dedup_stats=dedup_stats)
     elif not scored:
         logger.info("No qualifying deals found — skipping output")
 
@@ -137,7 +146,7 @@ def run(
     return scored
 
 
-def _print_summary(deals: list) -> None:
+def _print_summary(deals: list, dedup_stats: dict | None = None) -> None:
     """Pretty-print top deals to console."""
     if not deals:
         print("\n── No qualifying deals found ──\n")
@@ -146,6 +155,13 @@ def _print_summary(deals: list) -> None:
     width = 100
     print("\n" + "=" * width)
     print(f"  TOP DEALS — {len(deals)} qualifying | Ranked by Opportunity Score")
+    if dedup_stats:
+        print(
+            f"  Pipeline: {dedup_stats.get('raw', '?')} raw → "
+            f"{dedup_stats.get('unique', '?')} unique  "
+            f"({dedup_stats.get('merged', 0)} duplicates merged, "
+            f"{dedup_stats.get('cross_source_merges', 0)} cross-source)"
+        )
     print("=" * width)
     header = f"{'#':<3} {'Score':>5}  {'Neighborhood':<20} {'Price':>10}  {'Units':>5}  {'Cap%':>5}  {'Source':<18}  Address"
     print(header)

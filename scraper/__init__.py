@@ -16,6 +16,7 @@ class Deal:
     channel: str                     # "on_market" | "off_market"
     url: str = ""
     external_id: str = ""
+    sources: list = field(default_factory=list)  # populated post-dedup with all sources where this deal appeared
 
     # Location
     address: str = ""

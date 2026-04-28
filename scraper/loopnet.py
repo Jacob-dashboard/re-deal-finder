@@ -1,14 +1,23 @@
 """
 LoopNet scraper — on-market multifamily/mixed-use in Cook County, IL.
 
-Uses Playwright (headless Chromium) to bypass JS rendering and anti-bot
-measures. Falls back gracefully with a warning if blocked.
+Uses Playwright (real Chrome via the `chrome` channel when available,
+plus playwright-stealth and a desktop-fingerprint context) to bypass JS
+rendering and Akamai Bot Manager. Falls back gracefully with a warning
+if blocked.
+
+If `output/loopnet_cookies.json` exists, the cookies are injected into
+the context before navigation — this lets a human-validated session
+(produced by `scripts/extract_loopnet_cookies.py`) carry past Akamai's
+IP/network-level challenges that headless code can't solve on its own.
 """
 
+import json
 import logging
 import random
 import re
 import time
+from pathlib import Path
 from typing import Optional
 from urllib.parse import urljoin
 
@@ -24,14 +33,26 @@ SEARCH_URL = (
     "https://www.loopnet.com/search/multifamily-properties/"
     "cook-county-il/for-sale/"
 )
+COOKIES_PATH = Path(config.LOCAL_OUTPUT_DIR) / "loopnet_cookies.json"
 
-# Realistic viewport + UA to avoid bot detection
-VIEWPORT = {"width": 1280, "height": 800}
+# Realistic viewport + UA to avoid bot detection.
+# Chrome 125+ string and 1920x1080 resolution match the most common desktop
+# fingerprint; LoopNet's Akamai Bot Manager is suspicious of unusual sizes.
+VIEWPORT = {"width": 1920, "height": 1080}
 USER_AGENT = (
     "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
     "AppleWebKit/537.36 (KHTML, like Gecko) "
-    "Chrome/124.0.0.0 Safari/537.36"
+    "Chrome/125.0.0.0 Safari/537.36"
 )
+
+# Anti-bot launch flags. --disable-blink-features=AutomationControlled is the
+# main one — it prevents `navigator.webdriver === true`, which is the cheapest
+# bot signal.
+LAUNCH_ARGS = [
+    "--disable-blink-features=AutomationControlled",
+    "--no-sandbox",
+    "--disable-dev-shm-usage",
+]
 
 
 # ---------------------------------------------------------------------------
@@ -133,114 +154,195 @@ def _parse_listing_card(card, base_url: str = BASE_URL) -> Optional[Deal]:
 # Playwright fetch
 # ---------------------------------------------------------------------------
 
-def _scrape_with_playwright(limit: int) -> list[Deal]:
-    """Scrape LoopNet using headless Chromium via Playwright."""
+def _is_blocked_page(page) -> bool:
+    """Detect Akamai/CAPTCHA/access-denied responses by title and body text."""
+    try:
+        title = (page.title() or "").lower()
+        if any(kw in title for kw in ("captcha", "challenge", "access denied", "just a moment", "blocked")):
+            return True
+        # Akamai Bot Manager often returns "Pardon Our Interruption" or empty
+        # body with reference IDs.
+        body_text = (page.evaluate("() => document.body && document.body.innerText || ''") or "").lower()
+        for kw in ("pardon our interruption", "verify you are a human", "access to this page has been denied"):
+            if kw in body_text:
+                return True
+    except Exception:
+        pass
+    return False
+
+
+def _try_apply_stealth(page) -> None:
+    """Best-effort: apply playwright-stealth patches if the package is installed."""
+    try:
+        from playwright_stealth import Stealth
+        Stealth().apply_stealth_sync(page)
+        logger.debug("LoopNet: playwright-stealth applied")
+    except ImportError:
+        logger.debug("LoopNet: playwright-stealth not installed — skipping")
+    except Exception as e:
+        logger.debug("LoopNet: stealth apply failed: %s", e)
+
+
+def _launch_browser(p):
+    """Launch real Chrome if available; fall back to bundled Chromium."""
+    from playwright.sync_api import Error as PWError
+    try:
+        return p.chromium.launch(
+            headless=True,
+            channel="chrome",
+            args=LAUNCH_ARGS,
+        )
+    except PWError as e:
+        logger.info("LoopNet: Chrome channel unavailable (%s) — falling back to bundled Chromium", e)
+        return p.chromium.launch(headless=True, args=LAUNCH_ARGS)
+
+
+def _new_context(browser):
+    """Create a context with a realistic desktop fingerprint + warmed cookies."""
+    ctx = browser.new_context(
+        viewport=VIEWPORT,
+        user_agent=USER_AGENT,
+        locale="en-US",
+        timezone_id="America/Chicago",
+        device_scale_factor=2,
+        is_mobile=False,
+        has_touch=False,
+        extra_http_headers={
+            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,"
+                      "image/avif,image/webp,*/*;q=0.8",
+            "Accept-Language": "en-US,en;q=0.9",
+            "Sec-Ch-Ua": '"Chromium";v="125", "Google Chrome";v="125", "Not.A/Brand";v="24"',
+            "Sec-Ch-Ua-Mobile": "?0",
+            "Sec-Ch-Ua-Platform": '"macOS"',
+            "Upgrade-Insecure-Requests": "1",
+        },
+    )
+
+    # Inject session cookies from a previous human-validated browser run.
+    # File format: list of Playwright cookie dicts (name, value, domain, path,
+    # expires, httpOnly, secure, sameSite). Generated by
+    # scripts/extract_loopnet_cookies.py.
+    if COOKIES_PATH.exists():
+        try:
+            cookies = json.loads(COOKIES_PATH.read_text())
+            ctx.add_cookies(cookies)
+            logger.info("LoopNet: loaded %d cookies from %s", len(cookies), COOKIES_PATH)
+        except Exception as e:
+            logger.warning("LoopNet: could not load cookies from %s: %s", COOKIES_PATH, e)
+
+    return ctx
+
+
+def _fetch_search_page_html(limit: int) -> Optional[str]:
+    """Open Akamai-protected search page once and return rendered HTML.
+
+    Returns None on bot-block / timeout. Retries once with a longer warm-up
+    if the first attempt is challenged.
+    """
     try:
         from playwright.sync_api import sync_playwright, TimeoutError as PWTimeout
     except ImportError:
         logger.error("LoopNet: playwright not installed — run: pip install playwright && playwright install chromium")
-        return []
+        return None
 
-    deals: list[Deal] = []
-    max_pages = min(3, config.MAX_PAGES)
+    for attempt in (1, 2):
+        try:
+            with sync_playwright() as p:
+                browser = _launch_browser(p)
+                ctx = _new_context(browser)
+                page = ctx.new_page()
+                _try_apply_stealth(page)
 
-    try:
-        with sync_playwright() as p:
-            browser = p.chromium.launch(headless=True)
-            ctx = browser.new_context(
-                viewport=VIEWPORT,
-                user_agent=USER_AGENT,
-                locale="en-US",
-            )
-            page = ctx.new_page()
+                # Block heavy assets to speed up — but keep CSS/JS so Akamai's
+                # client-side challenge actually completes.
+                page.route(
+                    "**/*.{png,jpg,jpeg,gif,svg,woff,woff2,ttf}",
+                    lambda r: r.abort(),
+                )
 
-            # Block images/fonts to speed up
-            page.route("**/*.{png,jpg,jpeg,gif,svg,woff,woff2,ttf}", lambda r: r.abort())
+                # Random pre-request warm-up so we don't hit the URL the
+                # millisecond the browser comes up.
+                time.sleep(random.uniform(2.0, 5.0))
 
-            logger.info("LoopNet: navigating to search page")
-            try:
-                page.goto(SEARCH_URL, wait_until="domcontentloaded", timeout=30_000)
-            except PWTimeout:
-                logger.warning("LoopNet: page load timed out — site may be blocking headless browsers")
-                browser.close()
-                return []
+                logger.info("LoopNet: navigating to search page (attempt %d)", attempt)
+                try:
+                    page.goto(SEARCH_URL, wait_until="domcontentloaded", timeout=45_000)
+                except PWTimeout:
+                    logger.warning("LoopNet: page load timed out (attempt %d)", attempt)
+                    browser.close()
+                    if attempt == 1:
+                        time.sleep(10)
+                        continue
+                    return None
 
-            # Detect CAPTCHA / challenge
-            title = page.title().lower()
-            if any(kw in title for kw in ["captcha", "challenge", "access denied", "just a moment"]):
-                logger.warning("LoopNet: CAPTCHA/challenge detected on initial load — returning empty")
-                browser.close()
-                return []
+                if _is_blocked_page(page):
+                    logger.warning("LoopNet: bot-detection page on attempt %d", attempt)
+                    browser.close()
+                    if attempt == 1:
+                        time.sleep(10)
+                        continue
+                    return None
 
-            for page_num in range(1, max_pages + 1):
-                if len(deals) >= limit:
-                    break
-
-                logger.info("LoopNet: scraping page %d", page_num)
-
-                # Wait for listing cards (any of the known selectors)
+                # Wait for cards
                 try:
                     page.wait_for_selector(
                         "article.listingCard, [data-testid='listing-card'], "
                         ".listing-card, li.placard",
-                        timeout=15_000,
+                        timeout=20_000,
                     )
                 except PWTimeout:
-                    logger.warning("LoopNet: no cards appeared on page %d — blocked or end of results", page_num)
-                    break
+                    logger.warning("LoopNet: no cards rendered on attempt %d", attempt)
+                    browser.close()
+                    if attempt == 1:
+                        time.sleep(10)
+                        continue
+                    return None
 
-                # Small human-like delay after render
-                time.sleep(random.uniform(3, 5))
+                # Human-like dwell
+                time.sleep(random.uniform(3.0, 8.0))
 
                 html = page.content()
-                soup = BeautifulSoup(html, "lxml")
+                browser.close()
+                return html
+        except Exception as e:
+            logger.warning("LoopNet: Playwright error on attempt %d: %s", attempt, e)
+            if attempt == 1:
+                time.sleep(10)
+                continue
+            return None
 
-                cards = (
-                    soup.select("article.listingCard")
-                    or soup.select("[data-testid='listing-card']")
-                    or soup.select(".listing-card")
-                    or soup.select("li.placard")
-                )
+    return None
 
-                if not cards:
-                    logger.info("LoopNet: no cards found on page %d", page_num)
-                    break
 
-                for card in cards:
-                    deal = _parse_listing_card(card)
-                    if deal and deal.url:
-                        deals.append(deal)
-                    if len(deals) >= limit:
-                        break
+def _scrape_with_playwright(limit: int) -> list[Deal]:
+    """Scrape LoopNet using a stealth-patched Chrome via Playwright.
 
-                logger.info("LoopNet: page %d → %d cards (total: %d)", page_num, len(cards), len(deals))
+    Currently scrapes page 1 only, with retry on bot-block. Pagination over
+    Akamai-protected pages tends to re-challenge each click anyway; safer to
+    rely on the first page's listings (sorted by recency on LoopNet).
+    """
+    html = _fetch_search_page_html(limit)
+    if html is None:
+        logger.warning("LoopNet: no HTML retrieved — site is blocking headless browsers")
+        return []
 
-                if page_num >= max_pages or len(deals) >= limit:
-                    break
+    soup = BeautifulSoup(html, "lxml")
+    cards = (
+        soup.select("article.listingCard")
+        or soup.select("[data-testid='listing-card']")
+        or soup.select(".listing-card")
+        or soup.select("li.placard")
+    )
 
-                # Try to go to next page
-                next_btn = page.query_selector(
-                    "a[aria-label='Next page'], .pagination-next:not(.disabled), "
-                    "[class*='nextPage']:not([class*='disabled'])"
-                )
-                if not next_btn:
-                    logger.info("LoopNet: no next-page button — end of results at page %d", page_num)
-                    break
+    deals: list[Deal] = []
+    for card in cards:
+        if len(deals) >= limit:
+            break
+        deal = _parse_listing_card(card)
+        if deal and deal.url:
+            deals.append(deal)
 
-                try:
-                    next_btn.click()
-                    page.wait_for_load_state("domcontentloaded", timeout=15_000)
-                    time.sleep(random.uniform(3, 5))
-                except PWTimeout:
-                    logger.warning("LoopNet: timeout waiting for next page — stopping")
-                    break
-
-            browser.close()
-
-    except Exception as e:
-        logger.warning("LoopNet: Playwright error — %s — returning %d deals collected", e, len(deals))
-
-    logger.info("LoopNet: Playwright scrape complete — %d deals", len(deals))
+    logger.info("LoopNet: parsed %d cards → %d deals", len(cards), len(deals))
     return deals
 
 
@@ -252,10 +354,32 @@ def scrape(dry_run: bool = False, limit: int = 50) -> list[Deal]:
     """
     Main entry point. Returns list of Deal objects from LoopNet.
     dry_run=True returns synthetic stub data instead of hitting the network.
+
+    LoopNet's Akamai EdgeSuite is currently IP-blocking this host (returns
+    HTTP "Access Denied" before any rendering). To avoid burning ~60s of
+    retries on every scan, the live path short-circuits unless either:
+
+      - a session cookie file exists at ``output/loopnet_cookies.json``
+        (produced by ``scripts/extract_loopnet_cookies.py``), OR
+      - the env var ``LOOPNET_FORCE=1`` is set (e.g. for testing from a
+        new IP / VPN / proxy).
+
+    Revisit this when an IP rotation, residential proxy, or fresh cookies
+    are available.
     """
+    import os
+
     if dry_run:
         logger.info("LoopNet: dry-run mode — returning stub deals")
         return _stub_deals()
+
+    if not COOKIES_PATH.exists() and not os.environ.get("LOOPNET_FORCE"):
+        logger.warning(
+            "LoopNet: skipped — Akamai is IP-blocking this host. "
+            "Run scripts/extract_loopnet_cookies.py from a real Chrome "
+            "session, or set LOOPNET_FORCE=1 to override."
+        )
+        return []
 
     logger.info("LoopNet: starting Playwright scrape (limit=%d)", limit)
     deals = _scrape_with_playwright(limit)

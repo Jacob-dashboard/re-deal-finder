@@ -142,62 +142,15 @@ def filter_deals(deals: list[Deal], verbose: bool = False) -> list[Deal]:
 
 
 # ---------------------------------------------------------------------------
-# Deduplication
+# Deduplication (delegated — see pipeline/dedup.py)
 # ---------------------------------------------------------------------------
 
+from pipeline.dedup import deduplicate as _cross_source_dedup
+
+
 def deduplicate(deals: list[Deal]) -> list[Deal]:
-    """
-    Remove duplicate deals across sources.
-    Dedup key: normalized address (primary) or URL (secondary).
-    When duplicates exist, prefer the one with more data (more fields filled).
-    """
-    seen_addresses: dict[str, Deal] = {}
-    seen_urls: dict[str, Deal] = {}
-    unique: list[Deal] = []
-    dupes = 0
-
-    def _completeness(d: Deal) -> int:
-        """Count non-None, non-empty scalar fields."""
-        import dataclasses
-        return sum(
-            1 for f in dataclasses.fields(d)
-            if getattr(d, f.name) not in (None, "", [], {})
-            and f.name not in ("raw", "score_breakdown")
-        )
-
-    for deal in deals:
-        addr_key = _normalize_address(deal.address)
-        url_key  = (deal.url or "").strip().lower().rstrip("/")
-
-        # Check if we've seen this URL before
-        if url_key and url_key in seen_urls:
-            existing = seen_urls[url_key]
-            if _completeness(deal) > _completeness(existing):
-                seen_urls[url_key] = deal
-                # Swap in unique list
-                idx = unique.index(existing)
-                unique[idx] = deal
-            dupes += 1
-            continue
-
-        # Check address match (only for non-empty addresses)
-        if addr_key and addr_key in seen_addresses:
-            existing = seen_addresses[addr_key]
-            if _completeness(deal) > _completeness(existing):
-                seen_addresses[addr_key] = deal
-                idx = unique.index(existing)
-                unique[idx] = deal
-            dupes += 1
-            continue
-
-        # New unique deal
-        if addr_key:
-            seen_addresses[addr_key] = deal
-        if url_key:
-            seen_urls[url_key] = deal
-        unique.append(deal)
-
-    logger.info("Dedup: %d in → %d unique, %d duplicates removed", len(deals), len(unique), dupes)
+    """Backwards-compatible wrapper — discards stats, returns unique list only."""
+    unique, _stats = _cross_source_dedup(deals)
     return unique
 
 
@@ -205,7 +158,14 @@ def deduplicate(deals: list[Deal]) -> list[Deal]:
 # Combined entry point
 # ---------------------------------------------------------------------------
 
-def apply(deals: list[Deal], verbose: bool = False) -> list[Deal]:
-    """Filter then deduplicate. Returns clean list."""
+def apply(deals: list[Deal], verbose: bool = False) -> tuple[list[Deal], dict]:
+    """Filter then deduplicate.
+
+    Returns (clean_deals, dedup_stats). dedup_stats keys:
+      raw, unique, merged, cross_source_merges, filtered_in, filtered_out
+    """
     filtered = filter_deals(deals, verbose=verbose)
-    return deduplicate(filtered)
+    unique, stats = _cross_source_dedup(filtered)
+    stats["filtered_in"]  = len(filtered)
+    stats["filtered_out"] = len(deals) - len(filtered)
+    return unique, stats
