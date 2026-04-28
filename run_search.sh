@@ -16,4 +16,4 @@ elif [ -f "$SCRIPT_DIR/venv/bin/activate" ]; then
 fi
 
 # Pass all arguments through to Python
-exec python "$SCRIPT_DIR/run_search.py" "$@"
+exec python3 "$SCRIPT_DIR/run_search.py" "$@"

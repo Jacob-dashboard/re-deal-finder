@@ -35,7 +35,7 @@ import config
 
 logger = logging.getLogger(__name__)
 
-SHERIFF_SALE_URL = "https://www.cookcountysheriff.org/courts/civil-courts/judicial-sales/"
+SHERIFF_SALE_URL = "https://cookcountysheriffil.gov/departments/courts/civil-services/foreclosure-property-sale/"
 HUD_SEARCH_URL   = "https://www.hudhomestore.gov/Listing/PropertySearchResult.aspx"
 
 HEADERS = {

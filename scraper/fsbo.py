@@ -35,7 +35,7 @@ CL_BASE = "https://chicago.craigslist.org"
 CL_COMMERCIAL_URL = f"{CL_BASE}/search/clt"
 CL_REALESTATE_URL = f"{CL_BASE}/search/rea"
 
-FSBO_URL = "https://www.fsbo.com/search-results"
+FSBO_URL = "https://www.fsbo.com/listings/state/illinois/city/chicago/"
 
 SEARCH_KEYWORDS = [
     "apartment building",
