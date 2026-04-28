@@ -19,3 +19,4 @@ build/
 # Secrets
 .env
 *.env
+config/*_cookies.json
