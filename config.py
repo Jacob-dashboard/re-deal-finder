@@ -125,6 +125,18 @@ TELEGRAM_CHAT_ID    = "7748324699"  # @frogtree200 / The Narrator
 ALERT_EMAIL = ""
 
 # ---------------------------------------------------------------------------
+# Gmail Alert Scraper
+# ---------------------------------------------------------------------------
+# Reads Zenlist + LoopNet alert emails from a Gmail inbox and feeds the
+# listings into the deal pipeline. See GMAIL_SETUP.md for setup.
+GMAIL_EMAIL          = "Aiagent974@gmail.com"
+GMAIL_APP_PASSWORD   = ""        # 16-char Gmail App Password (IMAP path)
+GMAIL_USE_API        = False     # True = OAuth2 + Gmail API; False = IMAP
+GMAIL_CREDENTIALS_PATH = "credentials.json"   # OAuth client (only if GMAIL_USE_API)
+GMAIL_TOKEN_PATH       = "token.json"         # auto-generated on first OAuth run
+GMAIL_LOOKBACK_DAYS  = 1         # how far back to scan each pipeline run
+
+# ---------------------------------------------------------------------------
 # Scraper Settings
 # ---------------------------------------------------------------------------
 REQUEST_TIMEOUT    = 15     # seconds

@@ -7,7 +7,7 @@ Usage:
   python run_search.py [OPTIONS]
 
 Options:
-  --channel   on-market | off-market | all        (default: all)
+  --channel   on-market | off-market | email | all (default: all)
   --limit     max deals per scraper               (default: 50)
   --dry-run   use stub data, don't hit real sites  (default: False)
   --no-alert  skip notifications and file output   (default: False)
@@ -46,6 +46,7 @@ from scraper.cook_county   import scrape as scrape_cook_county
 from scraper.chicago_data  import scrape as scrape_chicago_data
 from scraper.foreclosure   import scrape as scrape_foreclosure
 from scraper.fsbo          import scrape as scrape_fsbo
+from scraper.gmail_alerts  import scrape as scrape_gmail
 
 # Pipeline
 from pipeline.filter import apply as filter_and_dedup
@@ -66,6 +67,10 @@ OFF_MARKET_SCRAPERS = {
     "chicago_data": scrape_chicago_data,
     "foreclosure":  scrape_foreclosure,
     "fsbo":         scrape_fsbo,
+}
+
+EMAIL_SCRAPERS = {
+    "gmail_alerts": scrape_gmail,
 }
 
 
@@ -113,6 +118,11 @@ def run(
     if channel in ("off-market", "all"):
         logger.info("--- Channel B: Off-Market ---")
         for name, fn in OFF_MARKET_SCRAPERS.items():
+            raw_deals.extend(_run_scraper(name, fn, dry_run, limit))
+
+    if channel in ("email", "all"):
+        logger.info("--- Channel C: Email Alerts ---")
+        for name, fn in EMAIL_SCRAPERS.items():
             raw_deals.extend(_run_scraper(name, fn, dry_run, limit))
 
     logger.info("Raw deals collected: %d (across all scrapers)", len(raw_deals))
@@ -181,7 +191,7 @@ def main():
     )
     parser.add_argument(
         "--channel",
-        choices=["on-market", "off-market", "all"],
+        choices=["on-market", "off-market", "email", "all"],
         default="all",
         help="Which channels to run (default: all)",
     )
